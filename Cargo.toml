@@ -1,0 +1,30 @@
+[package]
+name = "inn"
+version = "0.1.0"
+edition = "2021"
+default-run = "innvmtest"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+test-serde = ["serde", "dep:ron", "dep:serde_json"]
+serde = ["dep:serde"]
+
+[dependencies]
+ron = { version = "0.8.1", optional = true }
+serde_json = { version = "1.0.132", optional = true }
+serde = { version = "1.0.214", features = ["derive"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "stmt"
+harness = false
+
+[profile.release]
+debug = true
+
+[profile.bench]
+debug = true
