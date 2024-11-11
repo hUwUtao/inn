@@ -60,9 +60,8 @@ Inn uses a B-tree (balanced tree) structure for AOT compilation to optimize inst
 
 Example compilation:
 ```rust
-// Expression: (a and b) or (c and d)
 // Expression: '(a and b) or (c and d)'
-// Parsed into AST:
+// Parsed into AST (generated through `parse()`):
 let expr = Exp::Op(
     Box::new(Exp::Op(
         Box::new(Exp::Val("a".to_string())),
@@ -79,7 +78,7 @@ let expr = Exp::Op(
 
 let ops = vm.compile(expr).unwrap();
 
-/* Generates B-tree:
+/* Expression generates B-tree:
         OR(r0)
        /      \
    AND(r0)  AND(r1)
@@ -91,7 +90,6 @@ let ops = vm.compile(expr).unwrap();
  2. r1 = HeapPTR("c") AND HeapPTR("d")
  3. r0 = r0 OR r1
 */
-*/
 ```
 
 The balanced tree structure:
@@ -99,3 +97,15 @@ The balanced tree structure:
 - Minimizes instruction count
 - Enables parallel evaluation
 - Supports partial evaluation optimization
+
+## State of the optimization
+
+Whatever the chart is, in many non complex case, JIT beats off AOT with itself plus the AST (same thing AOT use)
+
+```
+        min          mean           max
+AOT
+time:   [4.1950 µs 4.2042 µs 4.2138 µs]
+JIT
+time:   [3.1339 µs 3.1400 µs 3.1460 µs]
+```

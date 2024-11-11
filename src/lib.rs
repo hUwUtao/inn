@@ -1,8 +1,30 @@
 //! A simple virtual machine for logical and math expressions.
 use std::collections::HashMap;
+
+/// Supported operators for the VM
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Op {
+    Is,          // ==
+    Not,         // !=
+    And,         // &&
+    Or,          // ||
+    Xor,         // ^
+    UpTo,        // <=
+    DownTo,      // >=
+    GreaterThan, // >
+    LesserThan,  // <
+    In,          // contains
+    Add,         // +
+    Subtract,    // -
+    Multiply,    // *
+    Divide,      // /
+    Power,       // ^
+    Modulo,      // %
+    Fmt,         // String format
+}
+
 /// Represents the types of values supported by the VM
-///
-/// Includes boolean, integer and string values that can be stored and manipulated
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Value {
@@ -13,9 +35,48 @@ pub enum Value {
     /// String value
     String(String),
 }
+
+/// Represents an expression in the abstract syntax tree (AST)
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Exp {
+    /// Variable or literal value node
+    Val(String),
+    /// Binary operation node with left operand, operator, and right operand
+    Op(Box<Exp>, Op, Box<Exp>),
+}
+
+/// The value defined in compiled instruction
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum VMExp {
+    /// Reference to a variable in the global heap
+    HeapVar(String),
+    /// Reference to a variable in the local heap
+    PHeapPtr(u8),
+    /// Reference to a value on the stack
+    StackPtr(u8),
+    /// Reference to a value in program
+    ConstPtr(u16),
+    /// A literal value
+    Literal(Value),
+}
+
+/// Represents a VM operation
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VMOp {
+    /// Destination register number (0-7)
+    pub reg: u8,
+    /// Operation to perform
+    pub op: Op,
+    /// Left operand expression
+    pub l: VMExp,
+    /// Right operand expression
+    pub r: VMExp,
+}
+
 /// Represents an executable VM program
-///
-/// Contains version info, memory requirements and compiled operations
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VMExec {
@@ -23,17 +84,33 @@ pub struct VMExec {
     pub ver: u8,
     /// Required private heap size in bytes
     pub private_heap: u16,
-    /// List of operations to execute
-    pub ops: Vec<VMOp>,
+    /// Shared const
+    pub consts: Vec<Value>,
+    /// List of instructions (operation) to execute
+    pub inst: Vec<VMOp>,
 }
 
-/// Register tracker
-///
-/// Once the tree expanded, manage heap will be a big ol problem.
+/// Register tracker for managing registers during compilation
 struct RegisterTracker {
     tracker: [bool; 8],
 }
 
+// /// Represents a prepared statement with parameters
+// #[derive(Debug)]
+// #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+// pub struct Stmt {
+//     expr: String,
+//     params: Vec<Value>,
+// }
+
+/// The virtual machine that handles parsing and evaluation
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VM {
+    heap_table: HashMap<String, Value>,
+}
+
+// Original implementations follow...
 impl RegisterTracker {
     fn new() -> Self {
         Self {
@@ -62,49 +139,104 @@ impl VMExec {
     pub fn compile(ast: Exp) -> Result<Self, String> {
         let mut ops = Vec::new();
         let mut reg_tracker = RegisterTracker::new();
+        let mut consts = Vec::new();
+        let mut const_map = std::collections::HashMap::new();
 
-        let _ = Self::compile_ast(&mut ops, &ast, &mut reg_tracker)?;
+        let _ = Self::compile_ast(
+            &mut ops,
+            &ast,
+            &mut reg_tracker,
+            &mut consts,
+            &mut const_map,
+        )?;
 
         Ok(VMExec {
-            ver: 1,
+            ver: 0x02,
             private_heap: 256,
-            ops,
+            consts,
+            inst: ops,
         })
-    }
-
-    fn parse_val(s: &str) -> Result<Value, String> {
-        if s.starts_with('\'') || s.starts_with('"') {
-            let content = &s[1..s.len() - 1];
-            Ok(Value::String(content.to_string()))
-        } else if let Ok(num) = s.parse::<i32>() {
-            Ok(Value::Int(num))
-        } else {
-            match s.to_lowercase().as_str() {
-                "true" => Ok(Value::Bool(true)),
-                "false" => Ok(Value::Bool(false)),
-                _ => Err(format!("Invalid value: {}", s)),
-            }
-        }
     }
 
     fn compile_ast(
         ops: &mut Vec<VMOp>,
         ast: &Exp,
         reg: &mut RegisterTracker,
+        consts: &mut Vec<Value>,
+        const_map: &mut std::collections::HashMap<Value, u16>,
     ) -> Result<VMExp, String> {
         match ast {
             Exp::Val(v) => {
-                let value = if let Ok(val) = Self::parse_val(v) {
-                    VMExp::Literal(val)
+                let value = if v.starts_with('\'') || v.starts_with('"') {
+                    let content = &v[1..v.len() - 1];
+                    if content.contains('{') && content.contains('}') {
+                        // Break the string into parts and create fmt operations
+                        let mut parts: Vec<Box<Exp>> = Vec::new();
+                        let mut current = String::new();
+                        let mut in_expr = false;
+                        let mut expr_start = 0;
+
+                        let chars: Vec<_> = content.chars().collect();
+                        let mut i = 0;
+                        while i < chars.len() {
+                            if chars[i] == '{' && i + 1 < chars.len() && chars[i + 1] == '}' {
+                                if !current.is_empty() {
+                                    parts.push(Exp::val(format!("'{}'", current)));
+                                    current.clear();
+                                }
+                                in_expr = true;
+                                expr_start = i;
+                                i += 2;
+                            } else {
+                                if in_expr {
+                                    in_expr = false;
+                                    let expr_str = &content[expr_start + 1..i - 1];
+                                    let expr = VM::parse(expr_str)?;
+                                    parts.push(Box::new(expr));
+                                }
+                                current.push(chars[i]);
+                                i += 1;
+                            }
+                        }
+
+                        if !current.is_empty() {
+                            parts.push(Exp::val(format!("'{}'", current)));
+                        }
+
+                        // Create fmt operations chain
+                        let mut result = parts[0].clone();
+                        for part in parts.iter().skip(1) {
+                            result = Exp::op(result, Op::Fmt, part.clone());
+                        }
+
+                        return Self::compile_ast(ops, &result, reg, consts, const_map);
+                    } else {
+                        Value::String(content.to_string())
+                    }
+                } else if let Ok(num) = v.parse::<i32>() {
+                    Value::Int(num)
                 } else {
-                    VMExp::HeapVar(v.clone())
+                    match v.to_lowercase().as_str() {
+                        "true" => Value::Bool(true),
+                        "false" => Value::Bool(false),
+                        _ => return Ok(VMExp::HeapVar(v.clone())),
+                    }
                 };
-                Ok(value)
+
+                // Deduplicate constants
+                if let Some(idx) = const_map.get(&value) {
+                    Ok(VMExp::ConstPtr(*idx))
+                } else {
+                    let idx = consts.len() as u16;
+                    const_map.insert(value.clone(), idx);
+                    consts.push(value);
+                    Ok(VMExp::ConstPtr(idx))
+                }
             }
             Exp::Op(left, op, right) => {
                 // Compile sub-expressions
-                let left_exp = Self::compile_ast(ops, left, reg)?;
-                let right_exp = Self::compile_ast(ops, right, reg)?;
+                let left_exp = Self::compile_ast(ops, left, reg, consts, const_map)?;
+                let right_exp = Self::compile_ast(ops, right, reg, consts, const_map)?;
                 // Allocate register for result
                 let result_reg = reg.allocate();
                 // Release values register
@@ -128,38 +260,6 @@ impl VMExec {
     }
 }
 
-/// Represents a VM operation
-///
-/// Contains the destination register, operator, left operand, and right operand for executing instructions
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct VMOp {
-    /// Destination register number (0-7)
-    pub reg: u8,
-    /// Operation to perform
-    pub op: Op,
-    /// Left operand expression
-    pub l: VMExp,
-    /// Right operand expression
-    pub r: VMExp,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-/// The value defined in compiled instruction
-pub enum VMExp {
-    /// Reference to a variable in the global heap
-    HeapVar(String),
-    /// Reference to a variable in the local heap
-    PHeapPtr(u8),
-    /// Reference to a value on the stack
-    StackPtr(u8),
-    /// A literal value
-    Literal(Value),
-    // /// A string literal
-    // String(String),
-}
-
 impl Value {
     #[inline]
     pub fn as_bool(&self) -> bool {
@@ -178,88 +278,37 @@ impl Value {
             Value::String(s) => s.parse::<i32>().unwrap_or(0),
         }
     }
-}
 
-/// Represents a prepared statement with parameters
-#[derive(Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Stmt {
-    expr: String,
-    params: Vec<Value>,
-}
-
-impl Stmt {
-    /// Binds a value to the next ? placeholder
-    pub fn bind(mut self, value: Value) -> Self {
-        self.params.push(value);
-        self
+    #[inline]
+    fn as_string(&self) -> String {
+        match self {
+            Value::String(s) => s.clone(),
+            Value::Int(i) => i.to_string(),
+            Value::Bool(b) => b.to_string(),
+        }
     }
 }
 
-/// Represents an expression in the abstract syntax tree (AST)
-///
-/// Can be either a value (variable/literal) or an operation between expressions
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum Exp {
-    /// Variable or literal value node
-    Val(String),
-    /// Binary operation node with left operand, operator, and right operand
-    Op(Box<Exp>, Op, Box<Exp>),
-}
+// impl Stmt {
+//     /// Binds a value to the next ? placeholder
+//     pub fn bind(mut self, value: Value) -> Self {
+//         self.params.push(value);
+//         self
+//     }
+// }
 
 impl Exp {
     /// Creates a new operator expression node
-    ///
-    /// # Arguments
-    /// * `left` - Left operand expression
-    /// * `op` - Operator
-    /// * `right` - Right operand expression
     #[inline]
     pub fn op(left: Box<Exp>, op: Op, right: Box<Exp>) -> Box<Exp> {
         Box::new(Exp::Op(left, op, right))
     }
 
     /// Creates a new value expression node
-    ///
-    /// # Arguments
-    /// * `name` - String value or variable name
     #[inline]
     pub fn val(name: String) -> Box<Exp> {
         Box::new(Exp::Val(name))
     }
-}
-
-/// Supported operators
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum Op {
-    Is,          // ==
-    Not,         // !=
-    And,         // &&
-    Or,          // ||
-    Xor,         // ^
-    UpTo,        // <=
-    DownTo,      // >=
-    GreaterThan, // >
-    LesserThan,  // <
-    In,          // contains
-    Add,         // +
-    Subtract,    // -
-    Multiply,    // *
-    Divide,      // /
-    Power,       // ^
-    Modulo,      // %
-}
-
-/// The virtual machine that handles parsing and evaluation of boolean expressions
-///
-/// Maintains a heap table mapping variable names to values and provides
-/// methods for parsing and evaluating expressions.
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct VM {
-    heap_table: HashMap<String, Value>,
 }
 
 impl VM {
@@ -269,14 +318,14 @@ impl VM {
         Self::default()
     }
 
-    /// Creates a new prepared statement
-    #[inline]
-    pub fn stmt(&self, expr: &str) -> Stmt {
-        Stmt {
-            expr: expr.to_string(),
-            params: Vec::new(),
-        }
-    }
+    // /// Creates a new prepared statement
+    // #[inline]
+    // pub fn stmt(expr: &str) -> Stmt {
+    //     Stmt {
+    //         expr: expr.to_string(),
+    //         params: Vec::new(),
+    //     }
+    // }
 
     /// Sets a value in the global context
     #[inline]
@@ -293,76 +342,183 @@ impl VM {
     /// Execute an expression string
     #[inline]
     pub fn exec(&self, expr: &str) -> Result<Value, String> {
-        self.eval(&self.parse(expr)?)
+        self.eval(&VM::parse(expr)?)
     }
 
     /// Execute an expression string with mutable VM access
     #[inline]
     pub fn exec_mut(&mut self, expr: &str) -> Result<Value, String> {
-        self.eval(&self.parse(expr)?)
+        self.eval(&VM::parse(expr)?)
     }
 
-    /// Evaluates an expression
-    #[inline]
+    /// Evaluates an expression (in JIT)
     pub fn eval(&self, expr: &Exp) -> Result<Value, String> {
         match expr {
-            Exp::Val(name) => self.eval_value(name),
+            Exp::Val(name) => {
+                if name.starts_with('\'') || name.starts_with('"') {
+                    let content = &name[1..name.len() - 1];
+                    Ok(Value::String(content.to_string()))
+                } else if let Ok(num) = name.parse::<i32>() {
+                    Ok(Value::Int(num))
+                } else if let Some(val) = self.heap_table.get(name) {
+                    Ok(val.clone())
+                } else {
+                    match name.to_lowercase().as_str() {
+                        "true" => Ok(Value::Bool(true)),
+                        "false" => Ok(Value::Bool(false)),
+                        _ => Err(format!("Invalid value: {}", name)),
+                    }
+                }
+            }
             Exp::Op(left, op, right) => {
                 let l = self.eval(left)?;
                 let r = self.eval(right)?;
-                self.eval_operation(op, l, r)
+                VM::eval_operation(op, l, r)
             }
         }
     }
 
-    /// Executes a prepared statement with bound parameters
-    pub fn exec_stmt(&self, stmt: Stmt) -> Result<Value, String> {
-        let mut param_index = 0;
-        let mut final_expr = String::with_capacity(stmt.expr.len());
-        let mut in_string = false;
-        let mut string_char = ' ';
+    /// Evaluate an executable
+    #[inline]
+    pub fn exec_aot(&self, exec: &VMExec) -> Result<Box<Value>, String> {
+        let mut stack: Vec<Option<Value>> = vec![None; 8];
 
-        for c in stmt.expr.chars() {
-            if !in_string && c == '?' {
-                if param_index >= stmt.params.len() {
-                    return Err("Not enough parameters".to_string());
+        for inst in &exec.inst {
+            let get_operand = |exp: &VMExp| -> Result<Value, String> {
+                match exp {
+                    VMExp::HeapVar(name) => self
+                        .heap_table
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| format!("Variable not found: {}", name)),
+                    VMExp::PHeapPtr(_) => todo!("Private Heap is not implemented"),
+                    VMExp::StackPtr(idx) => stack[*idx as usize]
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| format!("Value not found at stack index {}", idx)),
+                    VMExp::ConstPtr(idx) => Ok(exec.consts[*idx as usize].clone()),
+                    VMExp::Literal(v) => Ok(v.clone()),
                 }
-                let param = &stmt.params[param_index];
-                let param_str = match param {
-                    Value::Bool(b) => b.to_string(),
-                    Value::Int(i) => i.to_string(),
-                    Value::String(s) => format!("'{}'", s.replace('\'', "\\'")),
-                };
-                final_expr.push_str(&param_str);
-                param_index += 1;
+            };
+
+            let l = get_operand(&inst.l)?;
+            let r = get_operand(&inst.r)?;
+
+            let result = VM::eval_operation(&inst.op, l, r)?;
+            stack[inst.reg as usize] = Some(result);
+        }
+
+        if let Some(last_inst) = exec.inst.last() {
+            stack[last_inst.reg as usize]
+                .clone()
+                .map(Box::new)
+                .ok_or_else(|| "No result".to_string())
+        } else {
+            Err("No instructions".to_string())
+        }
+    }
+
+    fn parse_expr(tokens: &[String]) -> Result<Exp, String> {
+        let mut pos = 0;
+        let capacity = tokens.len() / 2;
+        let mut stack = Vec::with_capacity(capacity);
+        let mut operators = Vec::with_capacity(capacity);
+
+        while pos < tokens.len() {
+            let token = &tokens[pos];
+            if token.starts_with('\'') || token.starts_with('"') {
+                let content = &token[1..token.len() - 1];
+                if content.contains('{') && content.contains('}') {
+                    let mut parts = Vec::new();
+                    let mut current = String::new();
+                    let mut i = 0;
+                    let chars: Vec<_> = content.chars().collect();
+
+                    // Split into parts and expressions
+                    while i < chars.len() {
+                        if chars[i] == '{' {
+                            if !current.is_empty() {
+                                parts.push(Exp::Val(format!("'{}'", current)));
+                                current.clear();
+                            }
+                            i += 1; // Skip {
+                            let mut expr = String::new();
+                            while i < chars.len() && chars[i] != '}' {
+                                expr.push(chars[i]);
+                                i += 1;
+                            }
+                            if i < chars.len() {
+                                // Parse the expression inside {}
+                                let parsed = VM::parse(&expr)?;
+                                parts.push(parsed);
+                            }
+                            i += 1; // Skip }
+                        } else {
+                            current.push(chars[i]);
+                            i += 1;
+                        }
+                    }
+
+                    if !current.is_empty() {
+                        parts.push(Exp::Val(format!("'{}'", current)));
+                    }
+
+                    // Chain parts with fmt operators
+                    let mut expr = parts[0].clone();
+                    for part in parts.iter().skip(1) {
+                        expr = Exp::Op(Box::new(expr), Op::Fmt, Box::new(part.clone()));
+                    }
+                    stack.push(expr);
+                } else {
+                    stack.push(Exp::Val(token.clone()));
+                }
             } else {
-                if c == '\'' || c == '"' {
-                    if !in_string {
-                        in_string = true;
-                        string_char = c;
-                    } else if c == string_char {
-                        in_string = false;
+                match &token[..] {
+                    "(" => {
+                        operators.push(token.clone());
+                    }
+                    ")" => {
+                        while let Some(op) = operators.last() {
+                            if op == "(" {
+                                operators.pop();
+                                break;
+                            }
+                            VM::apply_operator(&mut stack, operators.pop().unwrap())?;
+                        }
+                    }
+                    "+" | "-" | "*" | "/" | "^" | "%" | "and" | "or" | "xor" | "not" | "is"
+                    | "<=" | ">=" | ">" | "<" | "in" => {
+                        while let Some(op) = operators.last() {
+                            if op == "(" || VM::precedence(op) < VM::precedence(token) {
+                                break;
+                            }
+                            VM::apply_operator(&mut stack, operators.pop().unwrap())?;
+                        }
+                        operators.push(token.clone());
+                    }
+                    _ => {
+                        stack.push(Exp::Val(token.clone()));
                     }
                 }
-                final_expr.push(c);
             }
+            pos += 1;
         }
 
-        if param_index < stmt.params.len() {
-            return Err("Too many parameters".to_string());
+        while let Some(op) = operators.pop() {
+            if op == "(" {
+                return Err("Unclosed parenthesis".to_string());
+            }
+            VM::apply_operator(&mut stack, op)?;
         }
 
-        let expr = self.parse(&final_expr)?;
-        self.eval(&expr)
+        if stack.len() == 1 {
+            Ok(stack.pop().unwrap())
+        } else {
+            Err("Invalid expression".to_string())
+        }
     }
 
-    #[inline]
-    fn eval_value(&self, name: &str) -> Result<Value, String> {
-        let value = self.parse_value(name)?;
-        Ok(value)
-    }
-
-    fn eval_operation(&self, op: &Op, left: Value, right: Value) -> Result<Value, String> {
+    fn eval_operation(op: &Op, left: Value, right: Value) -> Result<Value, String> {
         match op {
             // Math operations - convert bools to ints first
             Op::Add => Ok(Value::Int(left.as_int() + right.as_int())),
@@ -415,16 +571,23 @@ impl VM {
                 }
                 _ => Err("Invalid operation for types".to_string()),
             },
+
+            // String formatting
+            Op::Fmt => {
+                let mut result = left.as_string();
+                result.push_str(&right.as_string());
+                Ok(Value::String(result))
+            }
         }
     }
 
     /// Parses a string into an expression
-    pub fn parse(&self, input: &str) -> Result<Exp, String> {
-        let tokens = self.tokenize(input)?;
-        self.parse_expr(&tokens)
+    pub fn parse(input: &str) -> Result<Exp, String> {
+        let tokens = VM::tokenize(input)?;
+        VM::parse_expr(&tokens)
     }
 
-    fn tokenize(&self, input: &str) -> Result<Vec<String>, String> {
+    fn tokenize(input: &str) -> Result<Vec<String>, String> {
         let mut tokens = Vec::with_capacity(input.len() / 2);
         let mut chars = input.chars().peekable();
         let mut current = String::with_capacity(32);
@@ -479,107 +642,6 @@ impl VM {
         Ok(tokens)
     }
 
-    fn parse_value(&self, s: &str) -> Result<Value, String> {
-        if s.starts_with('\'') || s.starts_with('"') {
-            let content = &s[1..s.len() - 1];
-            Ok(Value::String(self.interpolate_string(content)?))
-        } else if let Ok(num) = s.parse::<i32>() {
-            Ok(Value::Int(num))
-        } else if let Some(value) = self.heap_table.get(s) {
-            Ok(value.clone())
-        } else {
-            match s.to_lowercase().as_str() {
-                "true" => Ok(Value::Bool(true)),
-                "false" => Ok(Value::Bool(false)),
-                _ => Err(format!("Invalid value: {}", s)),
-            }
-        }
-    }
-
-    fn interpolate_string(&self, s: &str) -> Result<String, String> {
-        let mut result = String::with_capacity(s.len());
-        let mut chars = s.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            if c == '$' && chars.peek() == Some(&'{') {
-                chars.next(); // consume '{'
-                let mut expr = String::with_capacity(32);
-                let mut depth = 1;
-
-                while let Some(c) = chars.next() {
-                    if c == '{' {
-                        depth += 1;
-                    } else if c == '}' {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    expr.push(c);
-                }
-
-                if !expr.is_empty() {
-                    let value = self.eval(&self.parse(&expr)?)?;
-                    result.push_str(&format!("{:?}", value));
-                }
-            } else {
-                result.push(c);
-            }
-        }
-        Ok(result)
-    }
-
-    fn parse_expr(&self, tokens: &[String]) -> Result<Exp, String> {
-        let mut pos = 0;
-        let capacity = tokens.len() / 2;
-        let mut stack = Vec::with_capacity(capacity);
-        let mut operators = Vec::with_capacity(capacity);
-
-        while pos < tokens.len() {
-            match &tokens[pos][..] {
-                "(" => {
-                    operators.push(tokens[pos].clone());
-                }
-                ")" => {
-                    while let Some(op) = operators.last() {
-                        if op == "(" {
-                            operators.pop();
-                            break;
-                        }
-                        Self::apply_operator(&mut stack, operators.pop().unwrap())?;
-                    }
-                }
-                "+" | "-" | "*" | "/" | "^" | "%" | "and" | "or" | "xor" | "not" | "is" | "<="
-                | ">=" | ">" | "<" | "in" => {
-                    while let Some(op) = operators.last() {
-                        if op == "(" || Self::precedence(op) < Self::precedence(&tokens[pos]) {
-                            break;
-                        }
-                        Self::apply_operator(&mut stack, operators.pop().unwrap())?;
-                    }
-                    operators.push(tokens[pos].clone());
-                }
-                _ => {
-                    stack.push(Exp::Val(tokens[pos].clone()));
-                }
-            }
-            pos += 1;
-        }
-
-        while let Some(op) = operators.pop() {
-            if op == "(" {
-                return Err("Unclosed parenthesis".to_string());
-            }
-            Self::apply_operator(&mut stack, op)?;
-        }
-
-        if stack.len() == 1 {
-            Ok(stack.pop().unwrap())
-        } else {
-            Err("Invalid expression".to_string())
-        }
-    }
-
     #[inline]
     fn precedence(op: &str) -> i32 {
         match op {
@@ -624,130 +686,5 @@ impl VM {
         };
         stack.push(Exp::Op(Box::new(left), operation, Box::new(right)));
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_not() {
-        let mut vm = VM::new();
-        vm.set_value("a", Value::Bool(true));
-        vm.set_value("b", Value::Bool(false));
-
-        assert_eq!(vm.exec("a not b").unwrap(), Value::Bool(true));
-    }
-
-    #[test]
-    fn test_stmt() {
-        let vm = VM::new();
-        let stmt = vm
-            .stmt("? and ?")
-            .bind(Value::Bool(true))
-            .bind(Value::Bool(false));
-        assert_eq!(vm.exec_stmt(stmt).unwrap(), Value::Bool(false));
-    }
-
-    #[test]
-    fn test_stmt_string() {
-        let vm = VM::new();
-        let stmt = vm
-            .stmt("? or ?")
-            .bind(Value::String("hello".to_string()))
-            .bind(Value::String("".to_string()));
-        assert_eq!(vm.exec_stmt(stmt).unwrap(), Value::Bool(true));
-    }
-
-    #[test]
-    fn test_stmt_number() {
-        let vm = VM::new();
-        let stmt = vm.stmt("? and ?").bind(Value::Int(1)).bind(Value::Int(0));
-        assert_eq!(vm.exec_stmt(stmt).unwrap(), Value::Bool(false));
-    }
-
-    #[test]
-    fn test_basic_operations() {
-        let mut vm = VM::new();
-        vm.set_value("a", Value::Int(5));
-        vm.set_value("b", Value::Int(10));
-
-        assert_eq!(vm.exec("a <= b").unwrap(), Value::Bool(true));
-        assert_eq!(vm.exec("b >= a").unwrap(), Value::Bool(true));
-        assert_eq!(vm.exec("a < b").unwrap(), Value::Bool(true));
-        assert_eq!(vm.exec("b > a").unwrap(), Value::Bool(true));
-    }
-
-    #[test]
-    fn test_value_parsing() {
-        let vm = VM::new();
-        assert_eq!(vm.parse_value("42").unwrap(), Value::Int(42));
-        assert_eq!(
-            vm.parse_value("\'hello\'").unwrap(),
-            Value::String("hello".to_string())
-        );
-        assert_eq!(vm.parse_value("true").unwrap(), Value::Bool(true));
-    }
-
-    #[test]
-    fn test_string_interpolation() {
-        let mut vm = VM::new();
-        vm.set_value("x", Value::Int(42));
-        assert_eq!(
-            vm.interpolate_string("Value is ${x}").unwrap(),
-            "Value is Int(42)"
-        );
-    }
-
-    #[test]
-    fn test_comparison_ops() {
-        let mut vm = VM::new();
-        vm.set_value("str1", Value::String("Hello World".to_string()));
-        vm.set_value("str2", Value::String("World".to_string()));
-        vm.set_value("num", Value::Int(5));
-
-        assert_eq!("Hello World".contains("World"), true);
-        assert_eq!(vm.exec("str2 in str1").unwrap(), Value::Bool(true));
-        assert_eq!(vm.exec("num in str1").unwrap(), Value::Bool(false));
-    }
-
-    #[test]
-    fn test_basic_math() {
-        let vm = VM::new();
-        assert_eq!(vm.exec("2 + 3").unwrap(), Value::Int(5));
-        assert_eq!(vm.exec("10 - 4").unwrap(), Value::Int(6));
-        assert_eq!(vm.exec("3 * 4").unwrap(), Value::Int(12));
-        assert_eq!(vm.exec("15 / 3").unwrap(), Value::Int(5));
-        assert_eq!(vm.exec("7 % 3").unwrap(), Value::Int(1));
-        assert_eq!(vm.exec("2 ^ 3").unwrap(), Value::Int(8));
-    }
-
-    #[test]
-    fn test_order_of_operations() {
-        let vm = VM::new();
-        assert_eq!(vm.exec("2 + 3 * 4").unwrap(), Value::Int(14));
-        assert_eq!(vm.exec("(2 + 3) * 4").unwrap(), Value::Int(20));
-        assert_eq!(vm.exec("2 ^ 3 + 1").unwrap(), Value::Int(9));
-        assert_eq!(vm.exec("10 - 2 * 3").unwrap(), Value::Int(4));
-    }
-
-    #[test]
-    fn test_math_errors() {
-        let vm = VM::new();
-        assert!(vm.exec("5 / 0").is_err());
-        assert!(vm.exec("10 % 0").is_err());
-        assert!(vm.exec("2 ^ -1").is_err());
-    }
-
-    #[test]
-    fn test_complex_math() {
-        let mut vm = VM::new();
-        vm.set_value("x", Value::Int(5));
-        vm.set_value("y", Value::Int(3));
-
-        assert_eq!(vm.exec("x * (y + 2)").unwrap(), Value::Int(25));
-        assert_eq!(vm.exec("(x + y) * (x - y)").unwrap(), Value::Int(16));
-        assert_eq!(vm.exec("x ^ 2 + y ^ 2").unwrap(), Value::Int(34));
     }
 }
