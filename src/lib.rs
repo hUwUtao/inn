@@ -181,7 +181,9 @@ impl VMExec {
                         while i < chars.len() {
                             if chars[i] == '{' && i + 1 < chars.len() && chars[i + 1] == '}' {
                                 if !current.is_empty() {
-                                    parts.push(Exp::val(format!("'{}'", current)));
+                                    parts.push(Box::new(Exp::Val(
+                                        String::from("'") + &current + "'",
+                                    )));
                                     current.clear();
                                 }
                                 in_expr = true;
@@ -200,7 +202,11 @@ impl VMExec {
                         }
 
                         if !current.is_empty() {
-                            parts.push(Exp::val(format!("'{}'", current)));
+                            let mut quoted = String::with_capacity(current.len() + 2);
+                            quoted.push('\'');
+                            quoted.push_str(&current);
+                            quoted.push('\'');
+                            parts.push(Exp::val(quoted));
                         }
 
                         // Create fmt operations chain
@@ -381,28 +387,33 @@ impl VM {
     /// Evaluate an executable
     #[inline]
     pub fn exec_aot(&self, exec: &VMExec) -> Result<Box<Value>, String> {
-        let mut stack: Vec<Option<Value>> = vec![None; 8];
+        let mut stack = vec![None; 8];
+
+        #[inline]
+        fn get_operand<'a>(
+            exp: &'a VMExp,
+            stack: &'a Vec<Option<Value>>,
+            heap: &'a HashMap<String, Value>,
+            consts: &'a [Value],
+        ) -> Result<Value, String> {
+            match exp {
+                VMExp::HeapVar(ref name) => heap
+                    .get(name)
+                    .cloned() // Needed clone since we can't return reference
+                    .ok_or_else(|| format!("Variable not found: {}", name)),
+                VMExp::PHeapPtr(_) => todo!("Private Heap is not implemented"),
+                VMExp::StackPtr(idx) => stack[*idx as usize]
+                    .clone()
+                    .clone() // Needed clone since we can't return reference
+                    .ok_or_else(|| format!("Value not found at stack index {}", idx)),
+                VMExp::ConstPtr(idx) => Ok(consts[*idx as usize].clone()), // Need to clone const
+                VMExp::Literal(ref v) => Ok(v.clone()),                    // Need to clone literal
+            }
+        }
 
         for inst in &exec.inst {
-            let get_operand = |exp: &VMExp| -> Result<Value, String> {
-                match exp {
-                    VMExp::HeapVar(name) => self
-                        .heap_table
-                        .get(name)
-                        .cloned()
-                        .ok_or_else(|| format!("Variable not found: {}", name)),
-                    VMExp::PHeapPtr(_) => todo!("Private Heap is not implemented"),
-                    VMExp::StackPtr(idx) => stack[*idx as usize]
-                        .as_ref()
-                        .cloned()
-                        .ok_or_else(|| format!("Value not found at stack index {}", idx)),
-                    VMExp::ConstPtr(idx) => Ok(exec.consts[*idx as usize].clone()),
-                    VMExp::Literal(v) => Ok(v.clone()),
-                }
-            };
-
-            let l = get_operand(&inst.l)?;
-            let r = get_operand(&inst.r)?;
+            let l = get_operand(&inst.l, &stack, &self.heap_table, &exec.consts)?;
+            let r = get_operand(&inst.r, &stack, &self.heap_table, &exec.consts)?;
 
             let result = VM::eval_operation(&inst.op, l, r)?;
             stack[inst.reg as usize] = Some(result);
@@ -604,7 +615,10 @@ impl VM {
                     if let Some(&next) = chars.peek() {
                         if (c == '<' && next == '=') || (c == '>' && next == '=') {
                             chars.next();
-                            tokens.push(format!("{}{}", c, next));
+                            let mut op = String::with_capacity(2);
+                            op.push(c);
+                            op.push(next);
+                            tokens.push(op);
                             continue;
                         }
                     }
