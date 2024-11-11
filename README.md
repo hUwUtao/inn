@@ -23,17 +23,25 @@ vm.set_value("count", Value::Int(5));
 let result = vm.exec("enabled and count > 3").unwrap();
 ```
 
-### AOT Mode (WIP)
+### AOT Mode
 ```rust
 let mut vm = VM::new();
 vm.set_value("x", Value::Int(10));
 
 // Compile once
-let ops = vm.compile("x > 5 and x < 20").unwrap();
+let exe = vm.compile("x > 5 and x < 20").unwrap();
 
 // Execute multiple times efficiently
-let result = vm.eval_aot(&ops).unwrap();
+let result = vm.exec_aot(&exe).unwrap();
 ```
+
+#### VMExec
+
+Is a format to store AOT instructions, not limit to any format serde-compatible. Why not store AST for JIT? I prefer so, actually less overhead on what being executed, but it actually more?. Updates:
+
+- `0x2`:
+    - Added `ConstPtr` and field `consts`
+
 
 ## Supported Operations
 
@@ -41,6 +49,14 @@ let result = vm.eval_aot(&ops).unwrap();
 - Boolean: `and`, `or`, `xor`, `not`
 - Arithmetic: `+`, `-`, `*`, `/`, `%`, `^`
 - String interpolation: `"Value: ${x}"`
+
+## Data types
+
+- Int: 32bit int
+- Bool: 8bit bool
+- String: Heap string
+- Imaginary: Nil (is not derive Int)
+- Abyss: Null
 
 ## Use Cases
 
@@ -109,3 +125,8 @@ time:   [4.1950 µs 4.2042 µs 4.2138 µs]
 JIT
 time:   [3.1339 µs 3.1400 µs 3.1460 µs]
 ```
+
+### talktuah
+
+Current state, AOT is kinda slow, for some reason. The main reason I think is it have many `clone` overhead. 
+Meanwhile doing for new datatype, I accidentally added 10% overhead for JIT, oopsie
