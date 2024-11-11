@@ -34,6 +34,10 @@ pub enum Value {
     Int(i32),
     /// String value
     String(String),
+    /// Null/absent value
+    Abyss,
+    /// Math error
+    Imaginary,
 }
 
 /// Represents an expression in the abstract syntax tree (AST)
@@ -94,14 +98,6 @@ pub struct VMExec {
 struct RegisterTracker {
     tracker: [bool; 8],
 }
-
-// /// Represents a prepared statement with parameters
-// #[derive(Debug)]
-// #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-// pub struct Stmt {
-//     expr: String,
-//     params: Vec<Value>,
-// }
 
 /// The virtual machine that handles parsing and evaluation
 #[derive(Debug, Clone, Default)]
@@ -209,7 +205,7 @@ impl VMExec {
                             parts.push(Exp::val(quoted));
                         }
 
-                        // Create fmt operations chain
+                        // Chain parts with fmt operators
                         let mut result = parts[0].clone();
                         for part in parts.iter().skip(1) {
                             result = Exp::op(result, Op::Fmt, part.clone());
@@ -273,6 +269,8 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
             Value::String(s) => !s.is_empty(),
+            Value::Abyss => false,
+            Value::Imaginary => false,
         }
     }
 
@@ -282,6 +280,9 @@ impl Value {
             Value::Int(i) => *i,
             Value::Bool(b) => *b as i32,
             Value::String(s) => s.parse::<i32>().unwrap_or(0),
+            Value::Abyss => 0,
+            // Last resort
+            Value::Imaginary => i32::MIN,
         }
     }
 
@@ -291,17 +292,11 @@ impl Value {
             Value::String(s) => s.clone(),
             Value::Int(i) => i.to_string(),
             Value::Bool(b) => b.to_string(),
+            Value::Abyss => String::from("::abyss"),
+            Value::Imaginary => String::from("::i"),
         }
     }
 }
-
-// impl Stmt {
-//     /// Binds a value to the next ? placeholder
-//     pub fn bind(mut self, value: Value) -> Self {
-//         self.params.push(value);
-//         self
-//     }
-// }
 
 impl Exp {
     /// Creates a new operator expression node
@@ -323,15 +318,6 @@ impl VM {
     pub fn new() -> Self {
         Self::default()
     }
-
-    // /// Creates a new prepared statement
-    // #[inline]
-    // pub fn stmt(expr: &str) -> Stmt {
-    //     Stmt {
-    //         expr: expr.to_string(),
-    //         params: Vec::new(),
-    //     }
-    // }
 
     /// Sets a value in the global context
     #[inline]
@@ -372,14 +358,27 @@ impl VM {
                     match name.to_lowercase().as_str() {
                         "true" => Ok(Value::Bool(true)),
                         "false" => Ok(Value::Bool(false)),
-                        _ => Err(format!("Invalid value: {}", name)),
+                        _ => Ok(Value::Abyss),
                     }
                 }
             }
             Exp::Op(left, op, right) => {
                 let l = self.eval(left)?;
                 let r = self.eval(right)?;
-                VM::eval_operation(op, l, r)
+                match (op, &l, &r) {
+                    // Handle math operations with Imaginary and Abyss
+                    (
+                        Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Power | Op::Modulo,
+                        Value::Imaginary,
+                        _,
+                    )
+                    | (
+                        Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Power | Op::Modulo,
+                        _,
+                        Value::Imaginary,
+                    ) => Ok(Value::Imaginary),
+                    _ => VM::eval_operation(op, l, r),
+                }
             }
         }
     }
@@ -397,17 +396,13 @@ impl VM {
             consts: &'a [Value],
         ) -> Result<Value, String> {
             match exp {
-                VMExp::HeapVar(ref name) => heap
-                    .get(name)
-                    .cloned() // Needed clone since we can't return reference
-                    .ok_or_else(|| format!("Variable not found: {}", name)),
+                VMExp::HeapVar(ref name) => Ok(heap.get(name).cloned().unwrap_or(Value::Abyss)),
                 VMExp::PHeapPtr(_) => todo!("Private Heap is not implemented"),
                 VMExp::StackPtr(idx) => stack[*idx as usize]
                     .clone()
-                    .clone() // Needed clone since we can't return reference
                     .ok_or_else(|| format!("Value not found at stack index {}", idx)),
-                VMExp::ConstPtr(idx) => Ok(consts[*idx as usize].clone()), // Need to clone const
-                VMExp::Literal(ref v) => Ok(v.clone()),                    // Need to clone literal
+                VMExp::ConstPtr(idx) => Ok(consts[*idx as usize].clone()),
+                VMExp::Literal(ref v) => Ok(v.clone()),
             }
         }
 
@@ -415,7 +410,21 @@ impl VM {
             let l = get_operand(&inst.l, &stack, &self.heap_table, &exec.consts)?;
             let r = get_operand(&inst.r, &stack, &self.heap_table, &exec.consts)?;
 
-            let result = VM::eval_operation(&inst.op, l, r)?;
+            let result = match (&inst.op, &l, &r) {
+                // Handle math operations
+                (
+                    Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Power | Op::Modulo,
+                    Value::Imaginary,
+                    _,
+                )
+                | (
+                    Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Power | Op::Modulo,
+                    _,
+                    Value::Imaginary,
+                ) => Ok(Value::Imaginary),
+                _ => VM::eval_operation(&inst.op, l, r),
+            }?;
+
             stack[inst.reg as usize] = Some(result);
         }
 
